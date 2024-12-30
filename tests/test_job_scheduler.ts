@@ -1,16 +1,16 @@
 import { expect } from 'chai';
 import { default as IORedis } from 'ioredis';
-import { beforeEach, describe, it, before, after as afterAll } from 'mocha';
+import { after as afterAll, before, beforeEach, describe, it } from 'mocha';
 
+import { rrulestr } from 'rrule';
 import * as sinon from 'sinon';
 import { v4 } from 'uuid';
-import { rrulestr } from 'rrule';
 import {
+  getNextMillis,
   Job,
   Queue,
   QueueEvents,
   Repeat,
-  getNextMillis,
   Worker,
 } from '../src/classes';
 import { JobsOptions } from '../src/types';
@@ -40,7 +40,9 @@ describe('Job Scheduler', function () {
   });
 
   beforeEach(async function () {
-    this.clock = sinon.useFakeTimers({ shouldClearNativeTimers: true });
+    this.clock = sinon.useFakeTimers({
+      shouldClearNativeTimers: true,
+    });
     queueName = `test-${v4()}`;
     queue = new Queue(queueName, { connection, prefix });
     repeat = new Repeat(queueName, { connection, prefix });
@@ -202,6 +204,54 @@ describe('Job Scheduler', function () {
 
       const repeatableJobs = await queue.getJobSchedulers();
       expect(repeatableJobs.length).to.be.eql(1);
+
+      const delayed = await queue.getDelayed();
+      expect(delayed).to.have.length(1);
+    });
+  });
+
+  describe('when job schedulers are upserted in quick succession', function () {
+    let worker: Worker;
+    beforeEach(async function () {
+      const date = new Date('2017-02-07 9:24:00');
+      this.clock.setSystemTime(date);
+
+      worker = new Worker(
+        queueName,
+        async () => {
+          await this.clock.tickAsync(1);
+        },
+        {
+          connection,
+          prefix,
+          concurrency: 1,
+        },
+      );
+      await worker.waitUntilReady();
+    });
+    afterEach(async function () {
+      await worker.close();
+    });
+
+    it('should create only one job scheduler and one delayed job', async function () {
+      const jobSchedulerId = 'test';
+      await queue.upsertJobScheduler(jobSchedulerId, {
+        every: ONE_MINUTE * 5,
+      });
+
+      await this.clock.tickAsync(1);
+
+      await queue.upsertJobScheduler(jobSchedulerId, {
+        every: ONE_MINUTE * 5,
+      });
+
+      const repeatableJobs = await queue.getJobSchedulers();
+      expect(repeatableJobs.length).to.be.eql(1);
+
+      await this.clock.tickAsync(ONE_MINUTE);
+
+      const delayed = await queue.getDelayed();
+      expect(delayed).to.have.length(1);
     });
   });
 
